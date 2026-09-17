@@ -4,13 +4,14 @@
 # OpenFlake implements a ServiceNow-compatible subset of the Table API
 # (/api/now/* is rewritten to /api/flake/*), but it is NOT ServiceNow:
 #
-#   * work_notes is a plain Text column, not a journal field -- writing to it
-#     REPLACES the value rather than appending, so this playbook reads the
-#     current value and appends to it. The UI activity feed renders the
-#     appended delta as a "Work Note" bubble.
-#   * The activity feed's user-facing comment stream is a separate table
-#     (sys_comment) behind /api/v1/records/incidents/{sys_id}/comments -- it is
-#     not reachable through the Table API.
+#   * work_notes and comments are plain Text columns, not journal fields. The
+#     Table API appends to them so several writers can share a ticket, but it
+#     accepts a full accumulated value too -- which is what this playbook
+#     sends, since it reads the current notes and appends its own. The UI
+#     activity feed renders each append as a separate bubble.
+#   * work_notes is the internal note; comments is the customer-facing stream
+#     (the "Add comment" box on the record). Passing the same text as both puts
+#     the message on the ticket twice.
 #   * Incident state codes: 1 New, 2 In Progress, 3 On Hold, 6 Resolved,
 #     7 Closed, 8 Canceled.
 #
@@ -25,10 +26,11 @@
     notification_body: ""
     # Empty string leaves the state untouched.
     snow_ticket_state: ""
-    # Off by default: the work note already appears in the Activity feed, so
-    # posting a comment too puts the same text on the ticket twice. Set true
-    # only when the message is genuinely customer-facing.
-    snow_post_comment: false
+    # Customer-facing text for the activity comment stream. Leave empty to
+    # post no comment. Do NOT set this to the same text as notification_body:
+    # work_notes is the internal note and comments is what the caller sees, so
+    # passing both the same string puts the message on the ticket twice.
+    snow_comment_body: ""
     snow_validate_certs: true
 
   tasks:
@@ -103,6 +105,11 @@
         snow_payload: "{{ snow_payload | combine({'state': snow_ticket_state}) }}"
       when: snow_ticket_state | default('', true) | length > 0
 
+    - name: Add the customer-facing comment when one was supplied
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'comments': snow_comment_body}) }}"
+      when: snow_comment_body | default('', true) | length > 0
+
     - name: Add resolution fields when resolving or closing
       ansible.builtin.set_fact:
         snow_payload: >-
@@ -133,25 +140,6 @@
         body: "{{ snow_payload }}"
         status_code: 200
       register: snow_update
-
-    # Separate table (sys_comment), separate endpoint -- this is what the
-    # "Add comment" box on the record writes to.
-    - name: Post update to the activity comment stream
-      ansible.builtin.uri:
-        url: "{{ snow_instance_url }}/api/v1/records/incidents/{{ snow_sys_id }}/comments"
-        method: POST
-        user: "{{ snow_username }}"
-        password: "{{ snow_password }}"
-        force_basic_auth: true
-        validate_certs: "{{ snow_validate_certs | bool }}"
-        headers:
-          Content-Type: "application/json"
-          Accept: "application/json"
-        body_format: json
-        body:
-          comment: "{{ snow_work_note }}"
-        status_code: 201
-      when: snow_post_comment | bool
 
     - name: Log result
       ansible.builtin.debug:
