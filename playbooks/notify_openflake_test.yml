@@ -79,23 +79,30 @@
         # default(_, true) also catches a JSON null from an empty column.
         snow_existing_work_notes: "{{ snow_lookup.json.result[0].work_notes | default('', true) }}"
 
-    # Artifacts describe what actually happened, so they replace whatever an
-    # upstream agent predicted would happen. This also fixes close_notes below,
-    # which derives from notification_body.
-    - name: Build the body from remediation artifacts when they are present
-      ansible.builtin.set_fact:
-        notification_body: |-
+    # Artifacts describe what actually happened; notification_body/_title are an
+    # upstream agent's prediction of what would happen. Prefer the artifacts.
+    #
+    # Written to NEW names on purpose. Extra vars are the highest precedence in
+    # Ansible -- above set_fact -- so assigning back to notification_body here
+    # would be silently discarded whenever the caller passes it as an extra var,
+    # which the AO workflow does.
+    - name: Resolve the note text, preferring measured results over predictions
+      vars:
+        has_artifacts: "{{ disk_after | default('', true) | length > 0 }}"
+        artifact_body: |-
           Disk cleanup completed.
 
           Filesystem usage: {{ disk_before }} -> {{ disk_after }}
           Large log files removed: {{ large_files_removed }}
           Space freed: {{ mb_freed }} MB
-          Disk errors in the last 60s: {{ disk_errors_remaining | default('0', true) }}
-      when: disk_after | default('', true) | length > 0
+          Disk errors since remediation started: {{ disk_errors_remaining | default('0', true) }}
+      ansible.builtin.set_fact:
+        note_title: "{{ 'Remediation Complete: Disk Cleanup' if has_artifacts | bool else notification_title }}"
+        note_body: "{{ artifact_body if has_artifacts | bool else notification_body }}"
 
     - name: Format notification body with newlines before numbered steps
       ansible.builtin.set_fact:
-        notification_body_formatted: "{{ notification_body | default('') | regex_replace('([^\\n]) ([0-9]+\\. )', '\\1\\n\\2') | regex_replace('([^\\n]) (Rollback:)', '\\1\\n\\n\\2') }}"
+        notification_body_formatted: "{{ note_body | default('') | regex_replace('([^\\n]) ([0-9]+\\. )', '\\1\\n\\2') | regex_replace('([^\\n]) (Rollback:)', '\\1\\n\\n\\2') }}"
 
     # The blank lines below are real YAML newlines. Do NOT rewrite them as
     # "\n" inside a Jinja string literal -- Ansible stores that escape
@@ -103,10 +110,9 @@
     - name: Build this run's work note
       ansible.builtin.set_fact:
         snow_work_note: |-
-          [{{ notification_title }}]
+          [{{ note_title }}]
 
           {{ notification_body_formatted }}
-
 
     - name: Append the note to any existing work notes
       ansible.builtin.set_fact:
@@ -138,7 +144,7 @@
         snow_payload: >-
           {{ snow_payload | combine({
                'close_code': 'Solved (Permanently)',
-               'close_notes': notification_body | default('Resolved by automated remediation.'),
+               'close_notes': note_body | default('Resolved by automated remediation.', true),
                'resolved_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')
              }) }}
       when: snow_ticket_state | default('', true) in ['6', '7']
