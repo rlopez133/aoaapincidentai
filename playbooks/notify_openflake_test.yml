@@ -36,13 +36,12 @@
     snow_close_notes: ""
     snow_validate_certs: true
 
-    # Published by a preceding remediation job's set_stats and propagated to
-    # this node as extra vars. Empty when no remediation ran.
-    disk_before: ""
-    disk_after: ""
-    mb_freed: ""
-    large_files_removed: ""
-    disk_errors_remaining: ""
+    # Published by a preceding remediation job's set_stats and forwarded to
+    # this node as extra vars. Empty when no remediation ran, which is the
+    # case for the first update on a ticket.
+    remediation_title: ""
+    remediation_summary: ""
+    remediation_close: ""
 
   tasks:
     - name: Look up ticket sys_id by number
@@ -82,33 +81,30 @@
         # default(_, true) also catches a JSON null from an empty column.
         snow_existing_work_notes: "{{ snow_lookup.json.result[0].work_notes | default('', true) }}"
 
-    # Artifacts describe what actually happened; notification_body/_title are an
-    # upstream agent's prediction of what would happen. Prefer the artifacts.
+    # A remediation job's artifacts describe what actually happened;
+    # notification_body/_title are an upstream agent's prediction of what would
+    # happen. Prefer the artifacts whenever they are present.
     #
     # Written to NEW names on purpose. Extra vars are the highest precedence in
     # Ansible -- above set_fact -- so assigning back to notification_body here
     # would be silently discarded whenever the caller passes it as an extra var,
     # which the AO workflow does.
+    #
+    # The summary text is built by the remediation playbook, not here, so this
+    # stays scenario-agnostic: disk, CPU, and anything added later all work
+    # without a branch.
     - name: Resolve the note text, preferring measured results over predictions
       vars:
-        has_artifacts: "{{ disk_after | default('', true) | length > 0 }}"
-        artifact_body: |-
-          Disk cleanup completed.
-
-          Filesystem usage: {{ disk_before }} -> {{ disk_after }}
-          Large log files removed: {{ large_files_removed }}
-          Space freed: {{ mb_freed }} MB
-          Disk errors since remediation started: {{ disk_errors_remaining | default('0', true) }}
+        rem_title: "{{ remediation_title | default('', true) }}"
+        rem_summary: "{{ remediation_summary | default('', true) }}"
+        rem_close: "{{ remediation_close | default('', true) }}"
+        resolved_body: "{{ rem_summary if rem_summary | length > 0 else notification_body }}"
+      ansible.builtin.set_fact:
+        note_title: "{{ rem_title if rem_title | length > 0 else notification_title }}"
+        note_body: "{{ resolved_body }}"
         # close_notes is the resolution summary on the record, not a second copy
         # of the internal work note -- one line, no step-by-step detail.
-        artifact_close: >-
-          Disk cleanup completed. Filesystem usage {{ disk_before }} -> {{ disk_after }},
-          {{ mb_freed }} MB freed across {{ large_files_removed }} large log file(s).
-          Disk errors since remediation started: {{ disk_errors_remaining | default('0', true) }}.
-      ansible.builtin.set_fact:
-        note_title: "{{ 'Remediation Complete: Disk Cleanup' if has_artifacts | bool else notification_title }}"
-        note_body: "{{ artifact_body if has_artifacts | bool else notification_body }}"
-        note_close: "{{ snow_close_notes if snow_close_notes | length > 0 else (artifact_close if has_artifacts | bool else notification_body) }}"
+        note_close: "{{ snow_close_notes if snow_close_notes | length > 0 else (rem_close if rem_close | length > 0 else resolved_body) }}"
 
     - name: Format notification body with newlines before numbered steps
       ansible.builtin.set_fact:
@@ -123,7 +119,6 @@
           [{{ note_title }}]
 
           {{ notification_body_formatted }}
-
 
     - name: Append the note to any existing work notes
       ansible.builtin.set_fact:
