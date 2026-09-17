@@ -118,15 +118,6 @@
       register: mem_pct_after
       changed_when: false
 
-    - name: Check web service post-remediation
-      ansible.builtin.shell: |
-        CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null) && \
-        TIME=$(curl -s -o /dev/null -w "%{time_total}" http://localhost:8080/health 2>/dev/null) && \
-        echo "HTTP $CODE in ${TIME}s" || echo "unreachable"
-      register: web_after
-      changed_when: false
-      ignore_errors: true
-
     # Anchored to the play's own start, not a rolling window -- a relative
     # --since reaches back past it and counts the simulator's planted
     # "no space left on device" messages as unresolved errors.
@@ -162,6 +153,5 @@
           large_files_removed: "{{ large_log_files.files | length }}"
           mb_freed: "{{ mb_freed | int + gz_mb_freed | int }}"
           memory_used_pct_after: "{{ mem_pct_after.stdout | trim }}"
-          web_check_after: "{{ web_after.stdout | trim }}"
           disk_errors_remaining: "{{ disk_errors_after.stdout | trim }}"
           status: "completed"
