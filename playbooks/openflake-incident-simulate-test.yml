@@ -44,11 +44,15 @@
       changed_when: false
       when: "'auto_remediate' in active_scenarios"
 
-    - name: Write disk pressure messages to syslog
+    # Growth rate, not a full disk -- 5G on a 30G volume is nowhere near ENOSPC.
+    # Keeping "no space"/"disk full" out of the text also means the remediation
+    # playbook's error grep reads zero on its own merits, not just because its
+    # --since window excludes these lines.
+    - name: Write log growth alerts to syslog
       ansible.builtin.shell: |
         for i in {1..20}; do
-          logger -t app -p local0.err "CRITICAL: Failed to write data - disk full on /var/log partition"
-          logger -t kernel -p kern.err "EXT4-fs error: no space left on device"
+          logger -t monitoring -p daemon.err "Filesystem /var/log grew 5G in under 60s - growth rate threshold exceeded"
+          logger -t app -p local0.err "Log rotation cannot keep pace with write volume on /var/log"
         done
       when: "'auto_remediate' in active_scenarios"
       changed_when: true
@@ -162,7 +166,7 @@
     scenarios:
       auto_remediate:
         short_description: "Abnormal log volume growth on {{ sim_host }}"
-        description: "/var/log usage on {{ sim_host }} rose from {{ sim_disk_pct_before }}% to {{ sim_disk_pct }}% ({{ sim_disk_used }} of {{ sim_disk_size }}) within a minute. Growth traced to /var/log/capacity_test.log. Application log writes failing. Automated cleanup safe to execute."
+        description: "/var/log usage on {{ sim_host }} rose from {{ sim_disk_pct_before }}% to {{ sim_disk_pct }}% ({{ sim_disk_used }} of {{ sim_disk_size }}) within a minute. Growth traced to /var/log/capacity_test.log. Automated cleanup safe to execute."
         category: "infrastructure"
         severity: "1-Critical"
         expected_route: "auto_remediate"
