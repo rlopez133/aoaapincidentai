@@ -84,7 +84,6 @@
     # which derives from notification_body.
     - name: Build the body from remediation artifacts when they are present
       ansible.builtin.set_fact:
-        notification_title: "Remediation Complete: Disk Cleanup"
         notification_body: |-
           Disk cleanup completed.
 
@@ -107,6 +106,7 @@
           [{{ notification_title }}]
 
           {{ notification_body_formatted }}
+
 
     - name: Append the note to any existing work notes
       ansible.builtin.set_fact:
