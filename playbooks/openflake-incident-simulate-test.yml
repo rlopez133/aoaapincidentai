@@ -12,7 +12,7 @@
 
 # Play 1: Plant issues on target host
 - name: Simulate - Plant Issues on Host
-  hosts: "{{ target_host | default('all:!localhost') }}"  
+  hosts: "{{ target_host | default('all:!localhost') }}"
   gather_facts: false
   become: true
 
@@ -22,6 +22,13 @@
         active_scenarios: "{{ scenario_list if scenario_list is sequence and scenario_list is not string else [scenario_list] }}"
 
     # --- auto_remediate: fill disk with large log files ---
+    - name: Baseline /var/log usage before planting
+      ansible.builtin.command:
+        cmd: df -BG --output=pcent,used,size /var/log
+      register: sim_df_before
+      changed_when: false
+      when: "'auto_remediate' in active_scenarios"
+
     - name: Fill disk with large log file to simulate capacity issue
       ansible.builtin.shell: |
         fallocate -l 5G /var/log/capacity_test.log 2>/dev/null || \
@@ -29,6 +36,13 @@
         echo "Capacity issue simulated: 5GB log file created"
       when: "'auto_remediate' in active_scenarios"
       changed_when: true
+
+    - name: Measure /var/log usage after planting
+      ansible.builtin.command:
+        cmd: df -BG --output=pcent,used,size /var/log
+      register: sim_df_after
+      changed_when: false
+      when: "'auto_remediate' in active_scenarios"
 
     - name: Write disk pressure messages to syslog
       ansible.builtin.shell: |
@@ -48,6 +62,17 @@
         echo "Runaway process planted with PID $(cat /tmp/runaway_process.pid)"
       when: "'needs_approval' in active_scenarios"
       changed_when: true
+
+    # ps %CPU is a lifetime average, so it reads near zero if sampled immediately.
+    - name: Measure the runaway process's real CPU usage
+      ansible.builtin.shell: |
+        sleep 3
+        pid=$(cat /tmp/runaway_process.pid)
+        cpu=$(ps -p "$pid" -o pcpu= 2>/dev/null | tr -d ' ')
+        echo "${cpu:-0} $(nproc)"
+      register: sim_cpu
+      changed_when: false
+      when: "'needs_approval' in active_scenarios"
 
     - name: Write high CPU alerts to syslog
       ansible.builtin.shell: |
@@ -83,13 +108,43 @@
       delegate_facts: true
       run_once: true
 
+    # Split per scenario -- a combined set_fact would fail on the undefined
+    # register of whichever scenario did not run.
+    - name: Publish the measured disk impact
+      ansible.builtin.set_fact:
+        sim_disk_pct_before: "{{ sim_df_before.stdout_lines[1].split()[0] | regex_replace('%', '') }}"
+        sim_disk_pct: "{{ sim_df_after.stdout_lines[1].split()[0] | regex_replace('%', '') }}"
+        sim_disk_used: "{{ sim_df_after.stdout_lines[1].split()[1] }}"
+        sim_disk_size: "{{ sim_df_after.stdout_lines[1].split()[2] }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      when: "'auto_remediate' in active_scenarios"
+
+    - name: Publish the measured CPU impact
+      ansible.builtin.set_fact:
+        sim_cpu_pct: "{{ sim_cpu.stdout.split()[0] }}"
+        sim_cpu_cores: "{{ sim_cpu.stdout.split()[1] }}"
+      delegate_to: localhost
+      delegate_facts: true
+      run_once: true
+      when: "'needs_approval' in active_scenarios"
+
 # Play 2: Create OpenFlake incidents and fire AO webhooks
 - name: Simulate - Create Tickets and Fire Webhooks
   hosts: localhost
   connection: local
   gather_facts: false
   vars:
+    # Measured in Play 1 rather than derived from target_host, so the ticket
+    # reports what actually happened on the box.
     sim_host: "{{ hostvars['localhost'].affected_host | default('unknown host') }}"
+    sim_disk_pct_before: "{{ hostvars['localhost'].sim_disk_pct_before | default('unknown') }}"
+    sim_disk_pct: "{{ hostvars['localhost'].sim_disk_pct | default('unknown') }}"
+    sim_disk_used: "{{ hostvars['localhost'].sim_disk_used | default('unknown') }}"
+    sim_disk_size: "{{ hostvars['localhost'].sim_disk_size | default('unknown') }}"
+    sim_cpu_pct: "{{ hostvars['localhost'].sim_cpu_pct | default('unknown') }}"
+    sim_cpu_cores: "{{ hostvars['localhost'].sim_cpu_cores | default('unknown') }}"
 
     # CHANGED: point at OpenFlake instead of ServiceNow. The `true` second
     # argument to default() matters -- an unset env var returns an empty
@@ -106,14 +161,14 @@
 
     scenarios:
       auto_remediate:
-        short_description: "Disk space critical on {{ sim_host }}"
-        description: "Root filesystem at 95% capacity on {{ sim_host }}. Application log writes failing. Large log files consuming /var/log partition. Automated cleanup safe to execute."
+        short_description: "Abnormal log volume growth on {{ sim_host }}"
+        description: "/var/log usage on {{ sim_host }} rose from {{ sim_disk_pct_before }}% to {{ sim_disk_pct }}% ({{ sim_disk_used }} of {{ sim_disk_size }}) within a minute. Growth traced to /var/log/capacity_test.log. Application log writes failing. Automated cleanup safe to execute."
         category: "infrastructure"
         severity: "1-Critical"
         expected_route: "auto_remediate"
       needs_approval:
         short_description: "Application environment running slow on {{ sim_host }}, high CPU utilization detected"
-        description: "Monitoring detected sustained high CPU utilization on {{ sim_host }}. Application response times degraded beyond SLA thresholds. A runaway process may be consuming resources. Terminating it will free CPU but may interrupt an active workload. Human review recommended before action."
+        description: "Monitoring detected a process on {{ sim_host }} sustaining {{ sim_cpu_pct }}% CPU on a {{ sim_cpu_cores }}-core host. Application response times degraded beyond SLA thresholds. A runaway process may be consuming resources. Terminating it will free CPU but may interrupt an active workload. Human review recommended before action."
         category: "infrastructure"
         severity: "2-High"
         expected_route: "needs_approval"
@@ -129,7 +184,7 @@
       "2-High": "2"
       "3-Medium": "3"
       "4-Low": "4"
-      
+
     snow_priority_map:
       "1-Critical": "1"
       "2-High": "3"
