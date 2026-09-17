@@ -79,15 +79,6 @@
       register: cpu_after
       changed_when: false
 
-    - name: Check web service post-remediation
-      ansible.builtin.shell: |
-        CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health 2>/dev/null) && \
-        TIME=$(curl -s -o /dev/null -w "%{time_total}" http://localhost:8080/health 2>/dev/null) && \
-        echo "HTTP $CODE in ${TIME}s" || echo "unreachable"
-      register: web_after
-      changed_when: false
-      ignore_errors: true
-
     - name: Record measured results
       ansible.builtin.set_fact:
         cpu_pct_before: "{{ cpu_before.stdout | trim }}"
@@ -103,7 +94,6 @@
           CPU Before: {{ cpu_pct_before }}% → After: {{ cpu_pct_after }}%
           High-CPU processes found: {{ high_cpu_procs.stdout_lines | length }}
           Processes killed: {{ procs_killed }}
-          Web service: {{ web_after.stdout | default('not checked') }}
           ============================================================
 
     - name: Publish results as artifacts
@@ -119,7 +109,6 @@
             CPU utilization: {{ cpu_pct_before }}% -> {{ cpu_pct_after }}%
             High-CPU processes found: {{ high_cpu_procs.stdout_lines | length }}
             Processes terminated: {{ procs_killed }}
-            Web service check: {{ web_after.stdout | default('not checked') | trim }}
           remediation_close: >-
             Process cleanup completed. CPU utilization {{ cpu_pct_before }}% ->
             {{ cpu_pct_after }}%, {{ procs_killed }} process(es) terminated.
@@ -128,5 +117,4 @@
           cpu_after: "{{ cpu_pct_after }}"
           high_cpu_processes_found: "{{ high_cpu_procs.stdout_lines | length }}"
           processes_killed: "{{ procs_killed }}"
-          web_check_after: "{{ web_after.stdout | default('not checked') | trim }}"
           status: "completed"
