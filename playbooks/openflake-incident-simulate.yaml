@@ -122,6 +122,12 @@
       "2-High": "2"
       "3-Medium": "3"
       "4-Low": "4"
+      
+    snow_priority_map:
+      "1-Critical": "1"
+      "2-High": "3"
+      "3-Medium": "3"
+      "4-Low": "5"
 
   tasks:
     - name: Build scenario list
@@ -175,6 +181,7 @@
           category: "{{ scenarios[item].category }}"
           urgency: "{{ snow_urgency_map[scenarios[item].severity] | default('2') }}"
           impact: "{{ snow_urgency_map[scenarios[item].severity] | default('2') }}"
+          priority: "{{ snow_priority_map[scenarios[item].severity] | default('4') }}"
           cmdb_ci: "{{ sim_host_sys_id }}"
           state: "1"
         status_code: [200, 201]
