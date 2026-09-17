@@ -97,9 +97,10 @@
     incident_types_list: "{{ incident_types if incident_types is iterable and incident_types is not string else [incident_types] }}"
     target_host: "{{ target_host | default('cert-demo-vm') }}"
     severity: "{{ severity | default('2-High') }}"
-    ao_base_url: "{{ lookup('env', 'AO_BASE_URL') | default('http://54.159.25.87:8080') }}"
-    ao_sa_client_id: "{{ lookup('env', 'AO_CLIENT_ID') }}"
-    ao_sa_client_secret: "{{ lookup('env', 'AO_CLIENT_SECRET') }}"
+    ao_instance: "{{ ao_instance | default('primary') }}"
+    ao_base_url: "{{ lookup('env', 'AO2_BASE_URL') if ao_instance == 'secondary' else lookup('env', 'AO_BASE_URL') | default('http://54.159.25.87:8080') }}"
+    ao_sa_client_id: "{{ lookup('env', 'AO2_CLIENT_ID') if ao_instance == 'secondary' else lookup('env', 'AO_CLIENT_ID') }}"
+    ao_sa_client_secret: "{{ lookup('env', 'AO2_CLIENT_SECRET') if ao_instance == 'secondary' else lookup('env', 'AO_CLIENT_SECRET') }}"
     incident_descriptions:
       service_down: "ops-monitor infrastructure service stopped unexpectedly on {{ target_host }}. Monitoring pipeline affected. Alerting and health checks may be missing."
       config_drift: "SSH configuration drift detected on {{ target_host }}. MaxAuthTries set to 10, violating CIS RHEL 9 benchmark (policy max: 4). Compliance scanner flagged."

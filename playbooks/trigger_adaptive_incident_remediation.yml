@@ -1,0 +1,144 @@
+---
+- name: Demo | Trigger Adaptive Incident Remediation
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    scenario: "disk_full"
+    ao_base_url: "{{ lookup('env', 'AO2_BASE_URL') }}"
+    ao_sa_client_id: "{{ lookup('env', 'AO2_CLIENT_ID') }}"
+    ao_sa_client_secret: "{{ lookup('env', 'AO2_CLIENT_SECRET') }}"
+    ao_webhook_path: "snow-incident-scn6"
+
+  tasks:
+    - name: Set scenario parameters
+      ansible.builtin.set_fact:
+        scenario_config:
+          disk_full:
+            short_description: "Root filesystem critical - application throwing disk full errors"
+            description: >-
+              Root filesystem at 94% capacity. Application is throwing ENOSPC errors and
+              users cannot complete transactions. Session storage is exhausted and new
+              writes are failing across the application tier.
+            severity: "2"
+            incident_type: "capacity_issue"
+            category: "Software"
+            subcategory: "Application"
+
+          memory_pressure:
+            short_description: "Memory pressure critical - application response degraded"
+            description: >-
+              Application memory usage at 89% with sustained pressure. Response times
+              have degraded significantly, intermittent OOM kills detected in kernel log.
+              Application pods are being evicted due to memory limit violations.
+            severity: "2"
+            incident_type: "capacity_issue"
+            category: "Software"
+            subcategory: "Application"
+
+          nfs_stale_mount:
+            short_description: "NFS mounts gone stale causing application I/O errors across compute tier"
+            description: >-
+              NFS mounts on application nodes reporting stale file handle errors.
+              Application processes blocking on I/O operations, causing request queues
+              to back up and timeouts propagating to end users. Shared storage mounts
+              at /mnt/app-data and /mnt/shared-config are inaccessible, preventing
+              configuration reads and write-back operations across the compute tier.
+            severity: "1"
+            incident_type: "unknown"
+            category: "Storage"
+            subcategory: "NFS"
+
+    - name: Validate scenario selection
+      ansible.builtin.fail:
+        msg: "Invalid scenario '{{ scenario }}'. Choose: disk_full, memory_pressure, nfs_stale_mount"
+      when: scenario not in scenario_config
+
+    - name: Set active scenario facts
+      ansible.builtin.set_fact:
+        active: "{{ scenario_config[scenario] }}"
+
+    - name: Create ServiceNow incident ticket
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/now/table/incident"
+        method: POST
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          short_description: "{{ active.short_description }}"
+          description: "{{ active.description }}"
+          urgency: "{{ active.severity }}"
+          impact: "{{ active.severity }}"
+          category: "{{ active.category }}"
+          subcategory: "{{ active.subcategory }}"
+          assignment_group: "IT Operations"
+          cmdb_ci: "{{ target_host }}"
+          work_notes: "Incident created for AI Adaptive Incident Remediation demo. Scenario: {{ scenario }}"
+        status_code: 201
+      register: snow_ticket
+
+    - name: Extract ticket details
+      ansible.builtin.set_fact:
+        ticket_id: "{{ snow_ticket.json.result.number }}"
+
+    - name: Display created ticket
+      ansible.builtin.debug:
+        msg: |
+          SNOW ticket created: {{ ticket_id }}
+          Scenario: {{ scenario }}
+          Firing AO webhook...
+
+    - name: Get AO service account token
+      ansible.builtin.uri:
+        url: "{{ ao_base_url }}/api/v1/auth/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          grant_type: client_credentials
+          client_id: "{{ ao_sa_client_id }}"
+          client_secret: "{{ ao_sa_client_secret }}"
+        validate_certs: false
+        status_code: [200, 201]
+      register: ao_token_resp
+
+    - name: Set AO token
+      ansible.builtin.set_fact:
+        ao_token: "{{ ao_token_resp.json.access_token }}"
+
+    - name: Fire AO webhook to start adaptive remediation workflow
+      ansible.builtin.uri:
+        url: "{{ ao_base_url }}/api/v1/webhooks/{{ ao_webhook_path }}"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ ao_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          ticket_id: "{{ ticket_id }}"
+          host: "{{ target_host }}"
+          severity: "{{ active.severity }}-{{ 'Critical' if active.severity == '1' else 'High' }}"
+          description: "{{ active.description }}"
+          incident_type: "{{ active.incident_type }}"
+        validate_certs: false
+        status_code: [200, 201, 202]
+      register: webhook_result
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          ADAPTIVE INCIDENT REMEDIATION TRIGGERED
+          ============================================================
+          Scenario:      {{ scenario }}
+          SNOW Ticket:   {{ ticket_id }}
+          Target Host:   {{ target_host }}
+          Expected Path: {{ 'Path 1 - Existing JT in AAP' if scenario == 'disk_full' else 'Path 2 - Playbook Found in GitHub' if scenario == 'memory_pressure' else 'Path 3 - No Automation Found' }}
+          Note: {{ 'NFS scenario has no matching JT or GitHub playbook' if scenario == 'nfs_stale_mount' else '' }}
+          AO Response:   {{ webhook_result.status }}
+          ============================================================

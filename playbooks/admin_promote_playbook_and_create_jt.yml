@@ -1,0 +1,215 @@
+---
+- name: Admin | Promote Playbook and Create Job Template
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    approved_repo: "anshulbehl/ansible-approved-automation"
+    approved_repo_branch: "main"
+    approved_target_dir: "playbooks/incident-response"
+    aap_validate_certs: false
+
+  tasks:
+    - name: Validate required variables are present
+      ansible.builtin.fail:
+        msg: "source_file_path is required but was not provided. Ensure the AO workflow node passes source_file_path from the agent output."
+      when: source_file_path is not defined or source_file_path == ''
+
+    - name: Derive playbook filename from source path
+      ansible.builtin.set_fact:
+        playbook_filename: "{{ source_file_path | basename }}"
+        approved_file_path: "{{ approved_target_dir }}/{{ source_file_path | basename }}"
+
+    - name: Get source playbook content from GitHub
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/{{ source_repo }}/contents/{{ source_file_path }}?ref={{ source_branch }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ github_token }}"
+          Accept: "application/vnd.github+json"
+        status_code: 200
+      register: source_file
+
+    - name: Check if file already exists in approved repo
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/{{ approved_repo }}/contents/{{ approved_file_path }}?ref={{ approved_repo_branch }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ github_token }}"
+          Accept: "application/vnd.github+json"
+        status_code: [200, 404]
+      register: existing_file
+
+    - name: Push playbook to approved repo (create or update)
+      ansible.builtin.uri:
+        url: "https://api.github.com/repos/{{ approved_repo }}/contents/{{ approved_file_path }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ github_token }}"
+          Accept: "application/vnd.github+json"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          message: "feat: promote {{ playbook_filename }} for incident remediation"
+          content: "{{ source_file.json.content }}"
+          branch: "{{ approved_repo_branch }}"
+          sha: "{{ existing_file.json.sha | default(omit) }}"
+        status_code: [200, 201]
+      register: push_result
+
+    - name: Find existing AAP project for approved repo
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/projects/?name=Approved+Automation+-+incident-response"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: existing_projects
+
+    - name: Set existing project id if found
+      ansible.builtin.set_fact:
+        aap_project_id: "{{ existing_projects.json.results[0].id }}"
+        aap_project_name: "{{ existing_projects.json.results[0].name }}"
+      when: existing_projects.json.count > 0
+
+    - name: Create AAP project for approved repo if not found
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/projects/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "Approved Automation - incident-response"
+          scm_type: "git"
+          scm_url: "https://github.com/{{ approved_repo }}.git"
+          scm_branch: "{{ approved_repo_branch }}"
+          scm_update_on_launch: true
+          organization: "{{ organization_id | default(1) }}"
+        status_code: 201
+      register: created_project
+      when: existing_projects.json.count == 0
+
+    - name: Set project id from newly created project
+      ansible.builtin.set_fact:
+        aap_project_id: "{{ created_project.json.id }}"
+        aap_project_name: "{{ created_project.json.name }}"
+      when: existing_projects.json.count == 0
+
+    - name: Trigger project sync
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/projects/{{ aap_project_id }}/update/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 202
+      register: sync_trigger
+
+    - name: Wait for project sync to complete
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/projects/{{ aap_project_id }}/"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: project_status
+      until: project_status.json.status in ['successful', 'failed', 'canceled']
+      retries: 20
+      delay: 10
+
+    - name: Fail if project sync failed
+      ansible.builtin.fail:
+        msg: "AAP project sync failed for {{ aap_project_name }}. Status: {{ project_status.json.status }}"
+      when: project_status.json.status != 'successful'
+
+    - name: Find default machine credential
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/credentials/?credential_type__kind=ssh&order_by=id&page_size=1"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: machine_creds
+      when: machine_credential_id is not defined
+
+    - name: Set machine credential id
+      ansible.builtin.set_fact:
+        machine_credential_id: "{{ machine_creds.json.results[0].id }}"
+      when: machine_credential_id is not defined and machine_creds.json.count > 0
+
+    - name: Find default inventory
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/inventories/?order_by=id&page_size=1"
+        method: GET
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        status_code: 200
+      register: inventories
+      when: inventory_id is not defined
+
+    - name: Set inventory id
+      ansible.builtin.set_fact:
+        inventory_id: "{{ inventories.json.results[0].id }}"
+      when: inventory_id is not defined and inventories.json.count > 0
+
+    - name: Create job template in AAP
+      ansible.builtin.uri:
+        url: "{{ aap_host }}/api/controller/v2/job_templates/"
+        method: POST
+        user: "{{ aap_username }}"
+        password: "{{ aap_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs }}"
+        headers:
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          name: "{{ jt_name }}"
+          job_type: "run"
+          inventory: "{{ inventory_id }}"
+          project: "{{ aap_project_id }}"
+          playbook: "{{ approved_file_path }}"
+          credential: "{{ machine_credential_id }}"
+          ask_variables_on_launch: true
+          description: "Auto-promoted from {{ source_repo }}/{{ source_file_path }} via AO incident remediation workflow"
+        status_code: 201
+      register: created_jt
+
+    - name: Report result
+      ansible.builtin.debug:
+        msg: |
+          ============================================================
+          PLAYBOOK PROMOTED AND JOB TEMPLATE CREATED
+          ============================================================
+          Source:        {{ source_repo }}/{{ source_file_path }}
+          Approved repo: {{ approved_repo }}/{{ approved_file_path }}
+          Commit:        {{ push_result.json.commit.sha }}
+          AAP Project:   {{ aap_project_name }} (id: {{ aap_project_id }})
+          Job Template:  {{ jt_name }} (id: {{ created_jt.json.id }})
+          ============================================================
+
+    - name: Publish promotion artifacts
+      ansible.builtin.set_stats:
+        data:
+          promoted_file: "{{ approved_file_path }}"
+          commit_sha: "{{ push_result.json.commit.sha }}"
+          aap_project_name: "{{ aap_project_name }}"
+          aap_project_id: "{{ aap_project_id | string }}"
+          jt_id: "{{ created_jt.json.id | string }}"
+          jt_name: "{{ jt_name }}"
+        per_host: false
