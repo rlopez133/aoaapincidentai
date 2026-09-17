@@ -1,0 +1,172 @@
+---
+# Update an OpenFlake incident from automation.
+#
+# OpenFlake implements a ServiceNow-compatible subset of the Table API
+# (/api/now/* is rewritten to /api/flake/*), but it is NOT ServiceNow:
+#
+#   * work_notes and comments are plain Text columns, not journal fields. The
+#     Table API appends to them so several writers can share a ticket, but it
+#     accepts a full accumulated value too -- which is what this playbook
+#     sends, since it reads the current notes and appends its own. The UI
+#     activity feed renders each append as a separate bubble.
+#   * work_notes is the internal note; comments is the customer-facing stream
+#     (the "Add comment" box on the record). Passing the same text as both puts
+#     the message on the ticket twice.
+#   * Incident state codes: 1 New, 2 In Progress, 3 On Hold, 6 Resolved,
+#     7 Closed, 8 Canceled.
+#
+# Required vars: snow_instance_url, snow_username, snow_password, ticket_id
+- name: Incidents | Update OpenFlake Ticket
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    notification_title: "AO Automation Update"
+    notification_body: ""
+    # Empty string leaves the state untouched.
+    snow_ticket_state: ""
+    # Customer-facing text for the activity comment stream. Leave empty to
+    # post no comment. Do NOT set this to the same text as notification_body:
+    # work_notes is the internal note and comments is what the caller sees, so
+    # passing both the same string puts the message on the ticket twice.
+    snow_comment_body: ""
+    snow_validate_certs: true
+
+    # Published by a preceding remediation job's set_stats and propagated to
+    # this node as extra vars. Empty when no remediation ran.
+    disk_before: ""
+    disk_after: ""
+    mb_freed: ""
+    large_files_removed: ""
+    disk_errors_remaining: ""
+
+  tasks:
+    - name: Look up ticket sys_id by number
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/now/table/incident?sysparm_query=number={{ ticket_id }}&sysparm_limit=1"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ snow_validate_certs | bool }}"
+        headers:
+          Accept: "application/json"
+        status_code: 200
+      register: snow_lookup
+
+    - name: Fail if ticket not found
+      ansible.builtin.fail:
+        msg: "OpenFlake ticket {{ ticket_id }} not found"
+      when: snow_lookup.json.result | length == 0
+
+    # A sysparm_query condition on an unknown field is dropped silently rather
+    # than erroring, and the list endpoint has no ORDER BY -- so a filter that
+    # fails to apply returns an arbitrary row instead of nothing. Confirm the
+    # record we are about to write to is the one that was asked for.
+    - name: Assert the lookup returned the requested ticket
+      ansible.builtin.assert:
+        that:
+          - snow_lookup.json.result[0].number == ticket_id
+        fail_msg: >-
+          Lookup for {{ ticket_id }} returned
+          {{ snow_lookup.json.result[0].number }} -- refusing to update the
+          wrong ticket.
+
+    - name: Set ticket facts
+      ansible.builtin.set_fact:
+        snow_sys_id: "{{ snow_lookup.json.result[0].sys_id }}"
+        # default(_, true) also catches a JSON null from an empty column.
+        snow_existing_work_notes: "{{ snow_lookup.json.result[0].work_notes | default('', true) }}"
+
+    # Artifacts describe what actually happened, so they replace whatever an
+    # upstream agent predicted would happen. This also fixes close_notes below,
+    # which derives from notification_body.
+    - name: Build the body from remediation artifacts when they are present
+      ansible.builtin.set_fact:
+        notification_title: "Remediation Complete: Disk Cleanup"
+        notification_body: |-
+          Disk cleanup completed.
+
+          Filesystem usage: {{ disk_before }} -> {{ disk_after }}
+          Large log files removed: {{ large_files_removed }}
+          Space freed: {{ mb_freed }} MB
+          Disk errors in the last 60s: {{ disk_errors_remaining | default('0', true) }}
+      when: disk_after | default('', true) | length > 0
+
+    - name: Format notification body with newlines before numbered steps
+      ansible.builtin.set_fact:
+        notification_body_formatted: "{{ notification_body | default('') | regex_replace('([^\\n]) ([0-9]+\\. )', '\\1\\n\\2') | regex_replace('([^\\n]) (Rollback:)', '\\1\\n\\n\\2') }}"
+
+    # The blank lines below are real YAML newlines. Do NOT rewrite them as
+    # "\n" inside a Jinja string literal -- Ansible stores that escape
+    # verbatim and the note renders as "...]\n\nIncident ..." in the UI.
+    - name: Build this run's work note
+      ansible.builtin.set_fact:
+        snow_work_note: |-
+          [{{ notification_title }}]
+
+          {{ notification_body_formatted }}
+
+    - name: Append the note to any existing work notes
+      ansible.builtin.set_fact:
+        snow_work_notes_value: |-
+          {% if snow_existing_work_notes | length > 0 %}{{ snow_existing_work_notes }}
+
+          {% endif %}{{ snow_work_note }}
+
+    - name: Build update payload
+      ansible.builtin.set_fact:
+        snow_payload:
+          work_notes: "{{ snow_work_notes_value }}"
+
+    # Built conditionally -- `omit` does NOT work inside set_fact, it leaks a
+    # literal __omit_place_holder__ string into the payload and the PATCH fails
+    # on the 8-char state column.
+    - name: Add state to payload when a target state was requested
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'state': snow_ticket_state}) }}"
+      when: snow_ticket_state | default('', true) | length > 0
+
+    - name: Add the customer-facing comment when one was supplied
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'comments': snow_comment_body}) }}"
+      when: snow_comment_body | default('', true) | length > 0
+
+    - name: Add resolution fields when resolving or closing
+      ansible.builtin.set_fact:
+        snow_payload: >-
+          {{ snow_payload | combine({
+               'close_code': 'Solved (Permanently)',
+               'close_notes': notification_body | default('Resolved by automated remediation.'),
+               'resolved_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')
+             }) }}
+      when: snow_ticket_state | default('', true) in ['6', '7']
+
+    - name: Add closed_at when closing
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'closed_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')}) }}"
+      when: snow_ticket_state | default('', true) == '7'
+
+    - name: Update ticket
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/now/table/incident/{{ snow_sys_id }}"
+        method: PATCH
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ snow_validate_certs | bool }}"
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body: "{{ snow_payload }}"
+        status_code: 200
+      register: snow_update
+
+    - name: Log result
+      ansible.builtin.debug:
+        msg: |
+          OpenFlake ticket {{ ticket_id }} updated.
+          State: {{ snow_update.json.result.state }}
+          URL: {{ snow_instance_url }}/incidents/{{ snow_sys_id }}
