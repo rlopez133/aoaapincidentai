@@ -25,9 +25,10 @@
     notification_body: ""
     # Empty string leaves the state untouched.
     snow_ticket_state: ""
-    # Also post the update to the Activity comment stream, so it shows up the
-    # same way a human comment would.
-    snow_post_comment: true
+    # Off by default: the work note already appears in the Activity feed, so
+    # posting a comment too puts the same text on the ticket twice. Set true
+    # only when the message is genuinely customer-facing.
+    snow_post_comment: false
     snow_validate_certs: true
 
   tasks:
@@ -72,18 +73,22 @@
       ansible.builtin.set_fact:
         notification_body_formatted: "{{ notification_body | default('') | regex_replace('([^\\n]) ([0-9]+\\. )', '\\1\\n\\2') | regex_replace('([^\\n]) (Rollback:)', '\\1\\n\\n\\2') }}"
 
-    # Folded scalars so the \n below are Jinja string escapes, not YAML ones.
+    # The blank lines below are real YAML newlines. Do NOT rewrite them as
+    # "\n" inside a Jinja string literal -- Ansible stores that escape
+    # verbatim and the note renders as "...]\n\nIncident ..." in the UI.
     - name: Build this run's work note
       ansible.builtin.set_fact:
-        snow_work_note: >-
-          {{ "[" + notification_title + "]\n\n" + notification_body_formatted }}
+        snow_work_note: |-
+          [{{ notification_title }}]
+
+          {{ notification_body_formatted }}
 
     - name: Append the note to any existing work notes
       ansible.builtin.set_fact:
-        snow_work_notes_value: >-
-          {{ (snow_existing_work_notes + "\n\n" + snow_work_note)
-             if snow_existing_work_notes | length > 0
-             else snow_work_note }}
+        snow_work_notes_value: |-
+          {% if snow_existing_work_notes | length > 0 %}{{ snow_existing_work_notes }}
+
+          {% endif %}{{ snow_work_note }}
 
     - name: Build update payload
       ansible.builtin.set_fact:
