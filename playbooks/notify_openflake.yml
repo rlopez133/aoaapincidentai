@@ -1,0 +1,143 @@
+---
+# Update an OpenFlake incident from automation.
+#
+# OpenFlake implements a ServiceNow-compatible subset of the Table API
+# (/api/now/* is rewritten to /api/flake/*), but it is NOT ServiceNow:
+#
+#   * work_notes is a plain Text column, not a journal field -- writing to it
+#     REPLACES the value rather than appending, so this playbook reads the
+#     current value and appends to it. The UI activity feed renders the
+#     appended delta as a "Work Note" bubble.
+#   * The activity feed's user-facing comment stream is a separate table
+#     (sys_comment) behind /api/v1/records/incidents/{sys_id}/comments -- it is
+#     not reachable through the Table API.
+#   * Incident state codes: 1 New, 2 In Progress, 3 On Hold, 6 Resolved,
+#     7 Closed, 8 Canceled.
+#
+# Required vars: snow_instance_url, snow_username, snow_password, ticket_id
+- name: Incidents | Update OpenFlake Ticket
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    notification_title: "AO Automation Update"
+    notification_body: ""
+    # Empty string leaves the state untouched.
+    snow_ticket_state: ""
+    # Also post the update to the Activity comment stream, so it shows up the
+    # same way a human comment would.
+    snow_post_comment: true
+    snow_validate_certs: true
+
+  tasks:
+    - name: Look up ticket sys_id by number
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/now/table/incident?sysparm_query=number={{ ticket_id }}&sysparm_limit=1"
+        method: GET
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ snow_validate_certs | bool }}"
+        headers:
+          Accept: "application/json"
+        status_code: 200
+      register: snow_lookup
+
+    - name: Fail if ticket not found
+      ansible.builtin.fail:
+        msg: "OpenFlake ticket {{ ticket_id }} not found"
+      when: snow_lookup.json.result | length == 0
+
+    - name: Set ticket facts
+      ansible.builtin.set_fact:
+        snow_sys_id: "{{ snow_lookup.json.result[0].sys_id }}"
+        # default(_, true) also catches a JSON null from an empty column.
+        snow_existing_work_notes: "{{ snow_lookup.json.result[0].work_notes | default('', true) }}"
+
+    - name: Format notification body with newlines before numbered steps
+      ansible.builtin.set_fact:
+        notification_body_formatted: "{{ notification_body | default('') | regex_replace('([^\\n]) ([0-9]+\\. )', '\\1\\n\\2') | regex_replace('([^\\n]) (Rollback:)', '\\1\\n\\n\\2') }}"
+
+    # Folded scalars so the \n below are Jinja string escapes, not YAML ones.
+    - name: Build this run's work note
+      ansible.builtin.set_fact:
+        snow_work_note: >-
+          {{ "[" + notification_title + "]\n\n" + notification_body_formatted }}
+
+    - name: Append the note to any existing work notes
+      ansible.builtin.set_fact:
+        snow_work_notes_value: >-
+          {{ (snow_existing_work_notes + "\n\n" + snow_work_note)
+             if snow_existing_work_notes | length > 0
+             else snow_work_note }}
+
+    - name: Build update payload
+      ansible.builtin.set_fact:
+        snow_payload:
+          work_notes: "{{ snow_work_notes_value }}"
+
+    # Built conditionally -- `omit` does NOT work inside set_fact, it leaks a
+    # literal __omit_place_holder__ string into the payload and the PATCH fails
+    # on the 8-char state column.
+    - name: Add state to payload when a target state was requested
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'state': snow_ticket_state}) }}"
+      when: snow_ticket_state | default('', true) | length > 0
+
+    - name: Add resolution fields when resolving or closing
+      ansible.builtin.set_fact:
+        snow_payload: >-
+          {{ snow_payload | combine({
+               'close_code': 'Solved (Permanently)',
+               'close_notes': notification_body | default('Resolved by automated remediation.'),
+               'resolved_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')
+             }) }}
+      when: snow_ticket_state | default('', true) in ['6', '7']
+
+    - name: Add closed_at when closing
+      ansible.builtin.set_fact:
+        snow_payload: "{{ snow_payload | combine({'closed_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')}) }}"
+      when: snow_ticket_state | default('', true) == '7'
+
+    - name: Update ticket
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/now/table/incident/{{ snow_sys_id }}"
+        method: PATCH
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ snow_validate_certs | bool }}"
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body: "{{ snow_payload }}"
+        status_code: 200
+      register: snow_update
+
+    # Separate table (sys_comment), separate endpoint -- this is what the
+    # "Add comment" box on the record writes to.
+    - name: Post update to the activity comment stream
+      ansible.builtin.uri:
+        url: "{{ snow_instance_url }}/api/v1/records/incidents/{{ snow_sys_id }}/comments"
+        method: POST
+        user: "{{ snow_username }}"
+        password: "{{ snow_password }}"
+        force_basic_auth: true
+        validate_certs: "{{ snow_validate_certs | bool }}"
+        headers:
+          Content-Type: "application/json"
+          Accept: "application/json"
+        body_format: json
+        body:
+          comment: "{{ snow_work_note }}"
+        status_code: 201
+      when: snow_post_comment | bool
+
+    - name: Log result
+      ansible.builtin.debug:
+        msg: |
+          OpenFlake ticket {{ ticket_id }} updated.
+          State: {{ snow_update.json.result.state }}
+          URL: {{ snow_instance_url }}/incidents/{{ snow_sys_id }}
