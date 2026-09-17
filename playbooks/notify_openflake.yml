@@ -49,6 +49,19 @@
         msg: "OpenFlake ticket {{ ticket_id }} not found"
       when: snow_lookup.json.result | length == 0
 
+    # A sysparm_query condition on an unknown field is dropped silently rather
+    # than erroring, and the list endpoint has no ORDER BY -- so a filter that
+    # fails to apply returns an arbitrary row instead of nothing. Confirm the
+    # record we are about to write to is the one that was asked for.
+    - name: Assert the lookup returned the requested ticket
+      ansible.builtin.assert:
+        that:
+          - snow_lookup.json.result[0].number == ticket_id
+        fail_msg: >-
+          Lookup for {{ ticket_id }} returned
+          {{ snow_lookup.json.result[0].number }} -- refusing to update the
+          wrong ticket.
+
     - name: Set ticket facts
       ansible.builtin.set_fact:
         snow_sys_id: "{{ snow_lookup.json.result[0].sys_id }}"
