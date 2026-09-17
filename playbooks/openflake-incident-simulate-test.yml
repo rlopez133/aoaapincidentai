@@ -125,10 +125,14 @@
       run_once: true
       when: "'auto_remediate' in active_scenarios"
 
+    # sim_cpu_pct is per-process (one saturated core = 100%). The remediation
+    # playbook reports system-wide (100 - idle), so publish that figure too --
+    # otherwise the ticket opens in one unit and closes in another.
     - name: Publish the measured CPU impact
       ansible.builtin.set_fact:
         sim_cpu_pct: "{{ sim_cpu.stdout.split()[0] }}"
         sim_cpu_cores: "{{ sim_cpu.stdout.split()[1] }}"
+        sim_cpu_total_pct: "{{ (((sim_cpu.stdout.split()[0] | float) / (sim_cpu.stdout.split()[1] | int)) | round | int) }}"
       delegate_to: localhost
       delegate_facts: true
       run_once: true
@@ -149,6 +153,7 @@
     sim_disk_size: "{{ hostvars['localhost'].sim_disk_size | default('unknown') }}"
     sim_cpu_pct: "{{ hostvars['localhost'].sim_cpu_pct | default('unknown') }}"
     sim_cpu_cores: "{{ hostvars['localhost'].sim_cpu_cores | default('unknown') }}"
+    sim_cpu_total_pct: "{{ hostvars['localhost'].sim_cpu_total_pct | default('unknown') }}"
 
     # CHANGED: point at OpenFlake instead of ServiceNow. The `true` second
     # argument to default() matters -- an unset env var returns an empty
@@ -172,7 +177,7 @@
         expected_route: "auto_remediate"
       needs_approval:
         short_description: "Application environment running slow on {{ sim_host }}, high CPU utilization detected"
-        description: "Monitoring detected a process on {{ sim_host }} sustaining {{ sim_cpu_pct }}% CPU on a {{ sim_cpu_cores }}-core host. Application response times degraded beyond SLA thresholds. A runaway process may be consuming resources. Terminating it will free CPU but may interrupt an active workload. Human review recommended before action."
+        description: "Monitoring detected a process on {{ sim_host }} sustaining {{ sim_cpu_pct }}% of one core, driving overall utilization on this {{ sim_cpu_cores }}-core host to {{ sim_cpu_total_pct }}%. Application response times degraded beyond SLA thresholds. A runaway process may be consuming resources. Terminating it will free CPU but may interrupt an active workload. Human review recommended before action."
         category: "infrastructure"
         severity: "2-High"
         expected_route: "needs_approval"
