@@ -31,6 +31,9 @@
     # work_notes is the internal note and comments is what the caller sees, so
     # passing both the same string puts the message on the ticket twice.
     snow_comment_body: ""
+    # Resolution summary. Empty falls back to a summary built from the
+    # artifacts, or to the work note text when there are none.
+    snow_close_notes: ""
     snow_validate_certs: true
 
     # Published by a preceding remediation job's set_stats and propagated to
@@ -96,9 +99,16 @@
           Large log files removed: {{ large_files_removed }}
           Space freed: {{ mb_freed }} MB
           Disk errors since remediation started: {{ disk_errors_remaining | default('0', true) }}
+        # close_notes is the resolution summary on the record, not a second copy
+        # of the internal work note -- one line, no step-by-step detail.
+        artifact_close: >-
+          Disk cleanup completed. Filesystem usage {{ disk_before }} -> {{ disk_after }},
+          {{ mb_freed }} MB freed across {{ large_files_removed }} large log file(s).
+          Disk errors since remediation started: {{ disk_errors_remaining | default('0', true) }}.
       ansible.builtin.set_fact:
         note_title: "{{ 'Remediation Complete: Disk Cleanup' if has_artifacts | bool else notification_title }}"
         note_body: "{{ artifact_body if has_artifacts | bool else notification_body }}"
+        note_close: "{{ snow_close_notes if snow_close_notes | length > 0 else (artifact_close if has_artifacts | bool else notification_body) }}"
 
     - name: Format notification body with newlines before numbered steps
       ansible.builtin.set_fact:
@@ -113,6 +123,7 @@
           [{{ note_title }}]
 
           {{ notification_body_formatted }}
+
 
     - name: Append the note to any existing work notes
       ansible.builtin.set_fact:
@@ -144,7 +155,7 @@
         snow_payload: >-
           {{ snow_payload | combine({
                'close_code': 'Solved (Permanently)',
-               'close_notes': note_body | default('Resolved by automated remediation.', true),
+               'close_notes': note_close | default('Resolved by automated remediation.', true),
                'resolved_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')
              }) }}
       when: snow_ticket_state | default('', true) in ['6', '7']
