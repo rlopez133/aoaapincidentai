@@ -141,6 +141,22 @@
     - name: Publish results as artifacts
       ansible.builtin.set_stats:
         data:
+          # Generic keys the notify playbook renders verbatim. Formatted here
+          # because this playbook is what knows what it did -- notify stays
+          # scenario-agnostic and needs no disk/CPU branching.
+          remediation_title: "Remediation Complete: Disk Cleanup"
+          remediation_summary: |-
+            Disk cleanup completed.
+
+            Filesystem usage: {{ disk_pct_before }} -> {{ disk_pct_after }}
+            Large log files removed: {{ large_log_files.files | length }}
+            Space freed: {{ mb_freed | int + gz_mb_freed | int }} MB
+            Disk errors since remediation started: {{ disk_errors_after.stdout | trim }}
+          remediation_close: >-
+            Disk cleanup completed. Filesystem usage {{ disk_pct_before }} ->
+            {{ disk_pct_after }}, {{ mb_freed | int + gz_mb_freed | int }} MB freed
+            across {{ large_log_files.files | length }} large log file(s).
+          # Detail keys, kept for debugging and any other consumer.
           disk_before: "{{ disk_pct_before }}"
           disk_after: "{{ disk_pct_after }}"
           large_files_removed: "{{ large_log_files.files | length }}"
