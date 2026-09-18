@@ -100,7 +100,7 @@
         rem_close: "{{ remediation_close | default('', true) }}"
         resolved_body: "{{ rem_summary if rem_summary | length > 0 else notification_body }}"
       ansible.builtin.set_fact:
-        note_title: "{{ rem_title if rem_title | length > 0 else notification_title }}"
+        note_title: "{{ rem_title if rem_title | length > 0 else (notification_title | default('AO Automation Update', true)) }}"
         note_body: "{{ resolved_body }}"
         # close_notes is the resolution summary on the record, not a second copy
         # of the internal work note -- one line, no step-by-step detail.
@@ -127,10 +127,13 @@
 
           {% endif %}{{ snow_work_note }}
 
+    # `| string` because set_fact literal-evaluates a rendered template, so a
+    # note that comes out as "[]" or "{}" turns into a real list or dict and the
+    # Table API rejects it on a Text column.
     - name: Build update payload
       ansible.builtin.set_fact:
         snow_payload:
-          work_notes: "{{ snow_work_notes_value }}"
+          work_notes: "{{ snow_work_notes_value | string }}"
 
     # Built conditionally -- `omit` does NOT work inside set_fact, it leaks a
     # literal __omit_place_holder__ string into the payload and the PATCH fails
