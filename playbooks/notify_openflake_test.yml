@@ -135,30 +135,33 @@
     # Built conditionally -- `omit` does NOT work inside set_fact, it leaks a
     # literal __omit_place_holder__ string into the payload and the PATCH fails
     # on the 8-char state column.
+    #
+    # `| string` because a state written as 2 rather than "2" in the AO node's
+    # extra vars reaches the Table API as a number and comes back a 500.
     - name: Add state to payload when a target state was requested
       ansible.builtin.set_fact:
-        snow_payload: "{{ snow_payload | combine({'state': snow_ticket_state}) }}"
-      when: snow_ticket_state | default('', true) | length > 0
+        snow_payload: "{{ snow_payload | combine({'state': snow_ticket_state | string}) }}"
+      when: snow_ticket_state | default('', true) | string | length > 0
 
     - name: Add the customer-facing comment when one was supplied
       ansible.builtin.set_fact:
-        snow_payload: "{{ snow_payload | combine({'comments': snow_comment_body}) }}"
-      when: snow_comment_body | default('', true) | length > 0
+        snow_payload: "{{ snow_payload | combine({'comments': snow_comment_body | string}) }}"
+      when: snow_comment_body | default('', true) | string | length > 0
 
     - name: Add resolution fields when resolving or closing
       ansible.builtin.set_fact:
         snow_payload: >-
           {{ snow_payload | combine({
                'close_code': 'Solved (Permanently)',
-               'close_notes': note_close | default('Resolved by automated remediation.', true),
+               'close_notes': note_close | default('Resolved by automated remediation.', true) | string,
                'resolved_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')
              }) }}
-      when: snow_ticket_state | default('', true) in ['6', '7']
+      when: snow_ticket_state | default('', true) | string in ['6', '7']
 
     - name: Add closed_at when closing
       ansible.builtin.set_fact:
         snow_payload: "{{ snow_payload | combine({'closed_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')}) }}"
-      when: snow_ticket_state | default('', true) == '7'
+      when: snow_ticket_state | default('', true) | string == '7'
 
     - name: Update ticket
       ansible.builtin.uri:
