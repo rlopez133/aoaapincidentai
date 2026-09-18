@@ -163,6 +163,11 @@
         snow_payload: "{{ snow_payload | combine({'closed_at': now(utc=true).strftime('%Y-%m-%d %H:%M:%S')}) }}"
       when: snow_ticket_state | default('', true) | string == '7'
 
+    # Temporary: prints the exact body the PATCH sends, types included.
+    - name: Show the payload
+      ansible.builtin.debug:
+        var: snow_payload
+
     - name: Update ticket
       ansible.builtin.uri:
         url: "{{ snow_instance_url }}/api/now/table/incident/{{ snow_sys_id }}"
